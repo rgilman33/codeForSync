@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<style>
+
+path {
+  stroke: #fff;
+}
+.stat {
+  display: inline-block;
+  margin: 0px 20px 0px 0px
+}
+ul {
+  list-style: none;
+}
+
+#filtersSidebar {
+  position: absolute;
+  left:0px;
+  top:0px;
+  width:200px;
+}
+
+#sunburstContainer {
+  position: absolute;
+  left:200px;
+  top:0px;
+}
+
+
+</style>
+<body>
+<!--<script src="d3.min.js"></script>-->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/3.5.5/d3.min.js"></script>
+
+
+<div id='sunburstContainer'>
+    <div id="statsPanel">
+     <div class="stat">
+        <p> Total Emitters </p>
+        <p id="TE"></p>
+      </div>
+      <div class="stat">
+        <p> Emitters Requested </p>
+        <p id="TR"></p>
+      </div>
+      <div class="stat">
+        <p> Emitters Not Requested </p>
+        <p id="TNR"></p>
+      </div>
+      <div class="stat">
+        <p> Emitters Produced </p>
+        <p id="TP"></p>
+      </div>
+      <div class="stat">
+        <p> Emitters Not Produced </p>
+        <p id="TNP"></p>
+      </div>
+      <div class="stat">
+        <p> Requested and Produced </p>
+        <p id="R_P"></p>
+      </div>
+      <div class="stat">
+        <p> Requested Not Produced </p>
+        <p id="R_NP"></p>
+      </div>
+      <div class="stat">
+        <p> Not Requested but Produced </p>
+        <p id="NR_P"></p>
+      </div>
+      <div class="stat">
+        <p> Not Requested Not Produced </p>
+        <p id="NR_NP"></p>
+      </div>
+    </div>
+    <div id="sunburst"></div>
+</div>
+
+<div id="filtersSidebar">
+  <ul>
+    <li>
+      <button id="updateButton" type="button">Update Sunburst</button>
+    </li>
+  </ul>
+  <ul id="programsForm">
+        <button id="selectAllProgramsButton" type="button">Select All Programs</button>
+        <button id="deselectAllProgramsButton" type="button">Deselect All Programs</button>
+  </ul>
+  <ul id="ipcsForm">
+          <button id="selectAllIPCsButton" type="button">Select All IPCs</button>
+        <button id="deselectAllIPCsButton" type="button">Deselect All IPCs</button>
+  </ul>
+  <ul id="criticalitiesForm">
+  </ul>
+  <ul id="tiersForm">
+  </ul>
+  <ul id="nipfsForm">
+  </ul>
+</div>
+
+<script>
+
+// using this later to determine unique ELNOTs
+function eliminateDuplicates(arr) {
+  var i,
+      len=arr.length,
+      out=[],
+      obj={};
+
+  for (i=0;i<len;i++) {
+    obj[arr[i]]=0;
+  }
+  for (i in obj) {
+    out.push(i);
+  }
+  return out;
+}
+
+var width = 550,
+    height = 550,
+    radius = (Math.min(width, height) / 2) - 10;
+
+var formatNumber = d3.format(",d");
+
+var x = d3.scale.linear()
+    .range([0, 2 * Math.PI]);
+
+var y = d3.scale.sqrt()
+    .range([0, radius]);
+
+var color = d3.scale.ordinal()
+              .domain(["AIR","ASCM", "NAVAL", "LAND SAM","COMNAV",'EW/ATC', 'ATC/EW', 'EA'])
+              .range(['#1b9e77','#d95f02','#7570b3','#377eb8','#66a61e','#e6ab02','#a6761d','#666666'])
+
+var counter = 0;
+
+var originalAORValues = {"AIR":0,"ASCM":0, "NAVAL":0, "LAND SAM":0,"COMNAV":0,'EW/ATC':0, 'ATC/EW':0, 'EA':0};
+var currentAORValues = {"AIR":0,"ASCM":0, "NAVAL":0, "LAND SAM":0,"COMNAV":0,'EW/ATC':0, 'ATC/EW':0, 'EA':0};
+
+var programs = [];
+var ipcs = [];
+var criticalities = [];
+var tiers = [];
+var nipfs = [];
+
+// Being lazy here. Instead of implementing transition logic for after filtering, just re-rendering the 
+// whole sunburst. Putting it in a function facilitates that.
+makeSunburst = function() {
+  counter+=1
+  var partition = d3.layout.partition()
+      .sort(function(a,b) {return d3.ascending(a.name, b.name)})
+      .value(function(d) { return d.size; })
+
+  var arc = d3.svg.arc()
+      .startAngle(function(d) { return Math.max(0, Math.min(2 * Math.PI, x(d.x))); })
+      .endAngle(function(d) { return Math.max(0, Math.min(2 * Math.PI, x(d.x + d.dx))); })
+      .innerRadius(function(d) { return Math.max(0, y(d.y)); })
+      .outerRadius(function(d) { return Math.max(0, y(d.y + d.dy)); });
+
+  d3.selectAll(".sunburstSvg").remove();
+
+  var svg = d3.select("#sunburst").append("svg")
+      .attr("width", width)
+      .attr("height", height)
+      .attr("class", "sunburstSvg")
+    .append("g")
+      .attr("transform", "translate(" + width / 2 + "," + (height / 2) + ")");
+
+
+  d3.json("flare2.json", function(error, root) {
+    // The JSON file we're bringing in is already nested into a heirarchical tree nested in this order: 
+    // Total --> Requested --> Produced --> Program --> IPC. Each IPC leaf stores a list of ELNOTs for that combo,
+    // which is rolled up based on the filter. The length of the array of unique ELNOTs post-rollup is passed
+    // to the outermost ring (Produced) as its size. We don't visualize the last two levels, but we need them
+    // if we want to filter on them. If we want to pass in more dimensions on which to filter, we'll just add branches
+    // to the tips of each limb. 
+
+    // The nesting is done by the Python file sitting next to this file. My thought was to speed up page rendering
+    // by creating the heirarchy beforehand rather than during use. 
+
+    if (counter != 1) {
+        IPCsToInclude = []; 
+        programsToInclude = [];
+        criticalitiesToInclude = [];
+        tiersToInclude = [];
+        nipfsToInclude = [];
+
+        d3.selectAll(".programFilter").each(function() {
+          if (this.checked) {
+            programsToInclude.push(this.value)
+          }
+        })
+        d3.selectAll(".ipcFilter").each(function() {
+          if (this.checked) {
+            IPCsToInclude.push(this.value)
+          }
+        })
+        d3.selectAll(".criticalityFilter").each(function() {
+          if (this.checked) {
+            criticalitiesToInclude.push(this.value)
+          }
+        })
+        d3.selectAll(".tierFilter").each(function() {
+          if (this.checked) {
+            tiersToInclude.push(this.value)
+          }
+        })
+        d3.selectAll(".nipfFilter").each(function() {
+          if (this.checked) {
+            nipfsToInclude.push(this.value)
+          }
+        })
+    }
+
+
+    // This rolls up the outermost leaves based on our filter. After this, the heirarchy 
+    // will be flattened into the form we'll use to visualize it. If it weren't for the "filter" we 
+    // need to implement, we could just import a nested JSON and avoid all this logic. 
+    cat_2 = root.children;
+    for (c_1 in cat_2) { //AOR level
+      cat_1Name=cat_2[c_1].name;
+      cat_1 = cat_2[c_1].children;
+      for (c0 in cat_1) { // Requested level
+        cat0Name=cat_1[c0].name;
+        cat0 = cat_1[c0].children;
+        for (c1 in cat0) { // Produced
+          cat1Name=cat0[c1].name;
+          cat1 = cat0[c1].children;
+          rollup2=0;
+          rollup2Elnots=[];
+          for (c2 in cat1) { // Program
+            cat2Name=cat1[c2].name;
+            cat2 = cat1[c2].children;
+            rollup=0;
+            rollupElnots=[];
+            for (c3 in cat2) { // IPC
+              cat3Name = cat2[c3].name;
+              cat3Size = cat2[c3].size;
+              cat3Elnots = cat2[c3].elnots;
+              cat3 = cat2[c3].children;
+              rollup_1Elnots = [];
+              for (c4 in cat3) { // Criticality
+                cat4Elnots = cat3[c4].elnots
+                cat4Name = cat3[c4].name
+                cat4 = cat3[c4].children
+                rollup_2Elnots = [];
+                for (c5 in cat4) { // Tier
+                  cat5Elnots = cat4[c5].elnots;
+                  cat5Name = cat4[c5].name;
+                  cat5=cat4[c5].children;
+                  rollup_3Elnots = [];
+                  for (c6 in cat5) { // NIPF
+                    cat6Elnots = cat5[c6].elnots
+                    cat6Name = cat5[c6].name
+
+                    // if it's the first rendering, adding names to list for population of html buttons and
+                    // just adding in the leaf's elnots (no filter applied yet). Logically this doesn't belong here:
+                    // it's just hitching a ride because we were looping anyway
+                    if (counter ==1) {
+                      programs.push(cat2Name)
+                      ipcs.push(cat3Name)
+                      criticalities.push(cat4Name)
+                      tiers.push(cat5Name)
+                      nipfs.push(cat6Name)
+                      rollup_3Elnots = rollup_3Elnots.concat(cat6Elnots);
+                      // if it's not the first rendering, using filtering logic
+                    } else if (counter!=1) {
+                      if (IPCsToInclude.includes(cat3Name) && programsToInclude.includes(cat2Name) && criticalitiesToInclude.includes(cat4Name) && tiersToInclude.includes(cat5Name) && nipfsToInclude.includes(cat6Name)) {
+                        rollup_3Elnots = rollup_3Elnots.concat(cat6Elnots);
+                      }
+                    }
+                  }
+                  delete cat4[c5].children
+                  rollup_2Elnots = rollup_2Elnots.concat(rollup_3Elnots)
+                }
+                delete cat3[c4].children
+                rollup_1Elnots = rollup_1Elnots.concat(rollup_2Elnots)
+              }
+              delete cat2[c3].children
+              rollupElnots = rollupElnots.concat(rollup_1Elnots)
+            }
+            delete cat1[c2].children
+            rollup2Elnots = rollup2Elnots.concat(rollupElnots)
+          }
+          delete cat0[c1].children
+          cat0[c1]['size']=eliminateDuplicates(rollup2Elnots).length
+        }
+      }
+    }
+
+    // if it's the first rendering, adding in the filter buttons we need
+    if (counter == 1) {
+      programs = eliminateDuplicates(programs).sort()
+      ipcs = eliminateDuplicates(ipcs).sort()
+      criticalities = eliminateDuplicates(criticalities).sort()
+      tiers = eliminateDuplicates(tiers).sort()
+      nipfs = eliminateDuplicates(nipfs).sort()
+
+      var addFilterBtns = function(dom, data, text, assignedClass) {
+        d3.select(dom).selectAll('li')
+        .data(data)
+        .enter()
+        .append('li')
+        .append('label')
+          .text(function(d) {return text+" "+d})
+        .append("input")
+          .attr('type','checkbox')
+          .attr('value', function(d) {return d})
+          .attr("class", assignedClass)
+          .attr("checked", true);
+      }
+
+      addFilterBtns(dom="#nipfsForm", data=nipfs, text="NIPF", assignedClass="nipfFilter")
+      addFilterBtns(dom="#tiersForm", data=tiers, text="Tier", assignedClass="tierFilter")
+      addFilterBtns(dom="#criticalitiesForm", data=criticalities, text="Criticality", assignedClass="criticalityFilter")
+      addFilterBtns(dom="#programsForm", data=programs, text="", assignedClass="programFilter")
+      addFilterBtns(dom="#ipcsForm", data=ipcs, text="", assignedClass="ipcFilter")
+    }
+
+    // Have to call cat_2 here to instantiate it for use below. Wish I knew more Javascript to explain why.
+    root.children=cat_2
+    testData = partition.nodes(root)
+
+    // If this is the first rendering of the sunburst, i.e. if user hasn't filtered yet, we're storing
+    // the unfiltered values for use in determining the difference btwn the later filtered values and original
+    // values, so we can keep inner ring the same size by adding back in the difference under the
+    // NOT REQUESTED and NOT PRODUCED category under the same AOR. If it's not the first rendering, we're 
+    // storing the current values for the same purpose.
+    if (counter == 1) {
+        for (aor in cat_2) {
+          originalAORValues[cat_2[aor].name] = cat_2[aor].value;
+        };
+    } else {
+      for (aor in cat_2) {
+          currentAORValues[cat_2[aor].name] = cat_2[aor].value;
+        };
+    }
+    // Adding the difference btwn original and current values back into NOT REQUESTED NOT PRODUCED under the 
+    // same AOR. ALso populating the stats values
+    stats = {'R_P':0, 'R_NP':0, 'NR_P':0, 'NR_NP':0};
+    for (c_1 in cat_2) { // AOR level
+      cat_1Name=cat_2[c_1].name;
+      cat_1 = cat_2[c_1].children;
+      var diff = originalAORValues[cat_1Name] - currentAORValues[cat_1Name];
+      console.log(cat_1Name, " diff is ", diff)
+      for (c0 in cat_1) { // Requested
+        cat0Name=cat_1[c0].name;
+        cat0 = cat_1[c0].children;
+        if (cat0Name=="NOT REQUESTED"){
+          for (c1 in cat0) { // Produced
+            cat1Name=cat0[c1].name;
+            cat1 = cat0[c1].children;
+            if (cat1Name=="NOT PRODUCED") {
+              console.log("AOR is ", cat_1Name)
+              if (counter > 1) { 
+                console.log("adding ", diff, " back in")
+                cat0[c1].size += diff
+              }
+            stats.NR_NP += cat0[c1].size
+            } else if (cat1Name=="PRODUCED") {
+              stats.NR_P += cat0[c1].size
+            }
+          }
+        } else if (cat0Name=="REQUESTED") {
+            for (c1 in cat0) { // Produced
+              cat1Name=cat0[c1].name;
+              if (cat1Name=="NOT PRODUCED") {
+              stats.R_NP += cat0[c1].size
+              } else if (cat1Name=="PRODUCED") {
+                stats.R_P += cat0[c1].size
+              }
+            }
+          }
+      }
+    }
+    d3.select("#TE").text(stats.R_P+stats.R_NP+stats.NR_NP+stats.NR_P)
+    d3.select("#TR").text(stats.R_NP+stats.R_P)
+    d3.select("#TP").text(stats.NR_P+stats.R_P)
+    d3.select("#R_P").text(stats.R_P)
+    d3.select("#R_NP").text(stats.R_NP)
+    d3.select("#NR_P").text(stats.NR_P)
+    d3.select("#NR_NP").text(stats.NR_NP)
+    d3.select("#TNR").text(stats.NR_P +stats.NR_NP)
+    d3.select("#TNP").text(stats.NR_NP + stats.R_NP)
+
+    // Refreshing this based on what we just did. 
+    root.children=cat_2
+    testData = partition.nodes(root)
+
+    if (error) throw error;
+
+    svg.selectAll("path")
+        .data(testData)
+      .enter().append("path")
+        .attr("d", arc)
+        .style("fill", function(d) { 
+          if (d.depth==0) {
+            return "white"
+          } else if (d.depth==1) {
+            return color(d.name) 
+          } else if (d.depth==2) {
+            if (d.name=="NOT REQUESTED") {
+              return "white"
+            } else {
+              return color(d.parent.name)
+            }
+          } else if (d.depth==3) {
+            if (d.name=="NOT PRODUCED") {
+              return "white"
+            } else {
+              return color(d.parent.parent.name)
+            }
+          }
+        })
+        .on("click", click)
+        .on("mouseover", mouseover)
+        .on("mouseout", mouseout)
+      .append("title")
+        .text(function(d) { return d.name + "\n" + formatNumber(d.value); });
+  });
+
+  function click(d) {
+    svg.transition()
+        .duration(750)
+        .tween("scale", function() {
+          var xd = d3.interpolate(x.domain(), [d.x, d.x + d.dx]),
+              yd = d3.interpolate(y.domain(), [d.y, d.depth == 3 ? 5 : 1]),
+              yr = d3.interpolate(y.range(), [d.y ? (d.depth==3?220:(d.depth==2?180:140)) : 0, d.depth == 3? radius+350 : radius]);
+              console.log(d.depth)
+          return function(t) { x.domain(xd(t)); y.domain(yd(t)).range(yr(t)); };
+        })
+      .selectAll("path")
+        .attrTween("d", function(d) { return function() { return arc(d); }; });
+  }
+  // Given a node in a partition layout, return an array of all of its ancestor
+  // nodes, highest first, but excluding the root.
+  function getAncestors(node) {
+      var path = [];
+      var current = node;
+      while (current.parent) {
+          path.unshift(current);
+          current = current.parent;
+      }
+      return path;
+  }
+
+  function mouseover(d) {
+      var sequenceArray = getAncestors(d);
+
+      // Fade all the segments.
+      d3.selectAll("path")
+          .style("opacity", 0.3);
+      // Then highlight only those that are an ancestor of the current segment.
+      d3.selectAll("path")
+          .filter(function(node) {
+              return (sequenceArray.indexOf(node) >= 0);
+          })
+          .style("opacity", 1);
+  }
+
+  function mouseout(d) {
+    d3.selectAll("path")
+        .style("opacity", 1)
+  }
+
+  d3.select(self.frameElement).style("height", height + "px");
+}
+
+
+makeSunburst();
+
+d3.select("#updateButton").on("click", function(){
+  console.log("clicked")
+  makeSunburst()
+})
+
+d3.select("#deselectAllProgramsButton").on("click", function() {
+  d3.selectAll(".programFilter").each(function() {
+    this.checked=false;
+  });
+})
+d3.select("#selectAllProgramsButton").on("click", function() {
+  console.log("clicked select programs")
+  d3.selectAll(".programFilter").each(function() {
+    this.checked=true;
+  });
+})
+
+d3.select("#deselectAllIPCsButton").on("click", function() {
+  d3.selectAll(".ipcFilter").each(function() {
+    this.checked=false;
+  });
+})
+d3.select("#selectAllIPCsButton").on("click", function() {
+  d3.selectAll(".ipcFilter").each(function() {
+    this.checked=true;
+  });
+})
+</script>

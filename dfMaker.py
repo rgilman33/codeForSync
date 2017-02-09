@@ -25,3 +25,5 @@ print(historicalBooty.to_json(orient='records'))
 
 totalBootyByShip = pd.pivot_table(historicalBooty, values='bootyAmount', index='Prey', aggfunc=np.sum)
 print(totalBootyByShip)
+
+historicalBooty.to_excel("historicalBooty.xlsx")
